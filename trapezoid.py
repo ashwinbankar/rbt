@@ -1,4 +1,3 @@
-
 # trapezoid.py
 """
 Refactored to be a class-based motor control module.

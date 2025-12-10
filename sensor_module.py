@@ -20,11 +20,11 @@ ADC_GAIN = 2/3
 
 # Sensor calibration constants
 # V_OFFSET: The measured voltage (after divider) at 0 Nm torque
-V_OFFSET = 0.2586
+V_OFFSET = 2.586
 
 # SLOPE: The conversion factor from (Voltage - Offset) to (Torque_Nm)
 # (2 / 0.039997) = 50.003
-SLOPE = -50.00375
+SLOPE = -5.00375
 
 # --- New Sanity Filter ---
 # User-defined max torque value
