@@ -7,7 +7,6 @@ in a separate thread for non-blocking data logging.
 import threading
 import time
 from sensor_module import Sensor
-from encoder_module import Encoder # Import our new module
 
 class DataAcquirer(threading.Thread):
     """

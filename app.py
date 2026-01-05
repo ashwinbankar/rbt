@@ -10,16 +10,20 @@ from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QComboBox, QSpinBox, 
                              QLineEdit, QPushButton, QGroupBox, QMessageBox,
-                             QFormLayout, QTabWidget, QFrame, QSizePolicy)
+                             QFormLayout, QFrame, QSizePolicy)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
-from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor, QPen
+from PyQt5.QtGui import QFont, QPixmap
 import pyqtgraph as pg
 import pigpio
-from pyqtgraph.exporters import ImageExporter
 
-# IMPORT MODULES
+# --- MATPLOTLIB SETUP ---
+import matplotlib
+matplotlib.use('Agg') 
+
+# IMPORT LOCAL MODULES
 from sensor_module import Sensor
 from trapezoid import MotorController
+from post_processing import ReportPlotter
 
 # --- HARDWARE CONFIGURATION ---
 PULSE_PIN = 18
@@ -27,17 +31,13 @@ DIRECTION_PIN = 25
 ENABLE_PIN = 24
 
 DRIVER_PPR = 200
-MOTOR_ACCEL = 3
+MOTOR_ACCEL = 3  
 
-# CONFIG FILE FOR CALIBRATION PERSISTENCE
 CONFIG_FILE = "config.json"
 
 # --- WORKER THREADS ---
 
 class CalibrationWorker(QThread):
-    """
-    Runs in background to measure Zero Offset.
-    """
     finished = pyqtSignal(float)
     error = pyqtSignal(str)
 
@@ -46,12 +46,11 @@ class CalibrationWorker(QThread):
             sensor = Sensor()
             readings = []
             start_time = time.time()
-            # Measure for 3 seconds
-            while time.time() - start_time < 3.0:
+            while time.time() - start_time < 2.0:
                 v = sensor.read_voltage()
                 if v is not None:
                     readings.append(v)
-                time.sleep(0.05)
+                time.sleep(0.01)
 
             if not readings:
                 raise Exception("No readings collected from sensor.")
@@ -62,10 +61,6 @@ class CalibrationWorker(QThread):
             self.error.emit(str(e))
 
 class TestWorker(QThread):
-    """
-    Runs the Motor Move and Data Logging simultaneously.
-    """
-    # Emits: (Timestamp, Theoretical_Angle, Torque)
     update_plot = pyqtSignal(float, float, float) 
     finished = pyqtSignal()
     error = pyqtSignal(str)
@@ -83,28 +78,22 @@ class TestWorker(QThread):
         
     def run(self):
         try:
-            # 1. Initialize Hardware
             self.sensor = Sensor()
             self.motor = MotorController(self.pi, PULSE_PIN, DIRECTION_PIN, ENABLE_PIN, DRIVER_PPR, MOTOR_ACCEL)
             
             full_data_log = []
-            start_time = time.perf_counter()
-            
-            # Calculate degrees per second for theoretical plotting
             deg_per_sec = self.rpm * 6.0
             
-            # 2. Start Motor in a separate standard thread
             motor_thread = threading.Thread(target=self._run_motor)
             motor_thread.start()
             
-            # 3. Data Acquisition Loop
+            time.sleep(0.1) 
+            start_time = time.perf_counter()
+
             while motor_thread.is_alive() and self.is_running:
                 now = time.perf_counter() - start_time
-                
-                # Calculate Theoretical Angle
                 theo_angle = now * deg_per_sec
                 
-                # Read Voltage & Calculate Torque
                 voltage = self.sensor.read_voltage()
                 if voltage is not None:
                     torque = self.slope * (voltage - self.v_offset)
@@ -113,12 +102,10 @@ class TestWorker(QThread):
 
                 self.update_plot.emit(now, theo_angle, torque)
                 full_data_log.append((now, theo_angle, torque))
-                
-                time.sleep(0.02) # 50Hz sampling
+                time.sleep(0.01) 
             
-            # 4. Cleanup
             if self.is_running:
-                motor_thread.join() # Wait for motor if not stopped
+                motor_thread.join()
             
             self.motor.cleanup()
             self.log_data.emit(full_data_log)
@@ -128,7 +115,6 @@ class TestWorker(QThread):
             self.error.emit(str(e))
 
     def _run_motor(self):
-        """Helper to run the blocking motor move."""
         try:
             self.motor.run_move(Sg=self.revs, Vg=self.rpm, direction=self.direction)
         except:
@@ -144,7 +130,6 @@ class RBT_GUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("RBT Measurement System")
         
-        # Apply Global Stylesheet for Uniform Headers
         self.setStyleSheet("""
             QGroupBox {
                 font-weight: bold;
@@ -164,17 +149,19 @@ class RBT_GUI(QMainWindow):
         if not self.pi.connected:
             QMessageBox.critical(self, "Error", "pigpio not connected.\nPlease run: sudo pigpiod")
 
-        # Create folder on Desktop immediately
         self.measurements_root = os.path.join(os.path.expanduser("~"), "Desktop", "Measurements")
         if not os.path.exists(self.measurements_root):
-            try:
-                os.makedirs(self.measurements_root)
+            try: os.makedirs(self.measurements_root)
             except: pass
+
+        self.plotter = ReportPlotter()
 
         self.v_offset = 2.586
         self.load_config()
-
         self.init_ui()
+        
+        # New variable to track dynamic y-limit
+        self.current_y_max = 11
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -223,7 +210,7 @@ class RBT_GUI(QMainWindow):
             self.lbl_logo.setAlignment(Qt.AlignCenter)
         left_layout.addWidget(self.lbl_logo)
 
-        # 2. Inputs Group
+        # 2. Inputs
         grp_inputs = QGroupBox("Vehicle Data")
         form = QFormLayout()
         self.in_company = QLineEdit()
@@ -236,13 +223,13 @@ class RBT_GUI(QMainWindow):
         form.addRow("Company:", self.in_company)
         form.addRow("Model:", self.in_model)
         form.addRow("Number Plate:", self.in_plate)
-        form.addRow("Disc ID (VL/VR/HL/HR):", self.in_disc)
-        form.addRow("Pad ID (VL/VR/HL/HR):", self.in_pad)
+        form.addRow("Disc ID:", self.in_disc)
+        form.addRow("Pad ID:", self.in_pad)
         form.addRow("Comments:", self.in_comments)
         grp_inputs.setLayout(form)
         left_layout.addWidget(grp_inputs)
 
-        # 3. Test Settings Group
+        # 3. Test Parameters
         grp_test = QGroupBox("Test Parameters")
         form_test = QFormLayout()
         self.combo_wheel = QComboBox()
@@ -262,7 +249,7 @@ class RBT_GUI(QMainWindow):
         grp_test.setLayout(form_test)
         left_layout.addWidget(grp_test)
 
-        # 4. Calibration Button
+        # 4. Calibration
         self.btn_cal = QPushButton(f"Calibrate Zero (V_Off: {self.v_offset:.3f}V)")
         self.btn_cal.clicked.connect(self.start_calibration)
         left_layout.addWidget(self.btn_cal)
@@ -304,14 +291,23 @@ class RBT_GUI(QMainWindow):
         left_layout.addLayout(btn_layout)
         layout.addWidget(left_panel)
 
-        # --- RIGHT PANEL ---
+        # --- RIGHT PANEL (GRAPH) ---
         self.plot_graph = pg.PlotWidget(title="Torque vs. Theoretical Rotation")
         self.plot_graph.setLabel('left', 'Torque (Nm)')
         self.plot_graph.setLabel('bottom', 'Theoretical Rotation (degrees)')
         self.plot_graph.showGrid(x=True, y=True, alpha=0.3)
         self.plot_graph.setBackground('w')
-        self.plot_graph.addLegend(offset=(10, 10))
-        self.plot_graph.setYRange(-2, 15, padding=0)
+
+        # Layout adjustments
+        self.plot_graph.getPlotItem().setContentsMargins(10, 10, 10, 40)
+        self.plot_graph.getPlotItem().getAxis('bottom').setHeight(35)
+        
+        self.plot_graph.plotItem.enableAutoRange(axis='x', enable=False)
+        self.plot_graph.plotItem.enableAutoRange(axis='y', enable=False)
+        
+        # Initial Fixed Range
+        self.plot_graph.setYRange(-1, 11, padding=0)
+        
         self.plot_graph.getPlotItem().setMouseEnabled(x=False, y=False)
         self.plot_graph.setMenuEnabled(False)
         self.plot_graph.getPlotItem().hideButtons()
@@ -353,32 +349,34 @@ class RBT_GUI(QMainWindow):
         self.stats_text.setText("Acquiring Data...")
         
         revs = self.spin_revs.value()
-        # --- CHANGED: EXACTLY 360 * REVS ---
         max_angle = revs * 360
-        self.plot_graph.setXRange(0, max_angle, padding=0)
-        self.stats_text.setPos(max_angle, 15)
         
-        # --- NEW: Set Axis Ticks to 360 multiples ---
+        self.plot_graph.setXRange(0, max_angle, padding=0)
+        self.plot_graph.plotItem.enableAutoRange(axis='x', enable=False)
+        
+        # --- RESET Y AXIS TO DEFAULT ---
+        self.current_y_max = 11
+        self.plot_graph.setYRange(-1, 11, padding=0)
+        
+        self.stats_text.setPos(max_angle, 9) 
+        
+        # Ticks every 90 degrees
         ax = self.plot_graph.getPlotItem().getAxis('bottom')
-        major_ticks = [(i * 360, str(i * 360)) for i in range(revs + 1)]
-        minor_ticks = []
-        # Add minor ticks every 90 deg if needed
-        for i in range(revs * 4 + 1):
+        ticks = []
+        for i in range(revs * 4 + 1): 
             val = i * 90
-            if val % 360 != 0:
-                minor_ticks.append((val, ''))
-        ax.setTicks([major_ticks, minor_ticks])
-        # ---------------------------------------------
+            ticks.append((val, str(val)))
+        ax.setTicks([ticks])
         
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_cal.setEnabled(False)
 
         wheel_idx = self.combo_wheel.currentIndex()
-        if wheel_idx == 1 or wheel_idx == 3: # VR or HR
+        if wheel_idx == 1 or wheel_idx == 3: 
             direction = 1 
             test_slope = 50.00375
-        else: # VL or HL
+        else: 
             direction = 0 
             test_slope = -50.00375
 
@@ -405,6 +403,15 @@ class RBT_GUI(QMainWindow):
         self.curve.setData(self.data_x, self.data_y)
         self.lbl_live_torque.setText(f"{torque:.2f} Nm")
         
+        # --- DYNAMIC SCALING (LIVE) ---
+        # If torque exceeds current limit (11 by default), expand limit
+        if torque > self.current_y_max:
+            new_limit = torque + 1 # Buffer of 1
+            if new_limit > self.current_y_max:
+                self.current_y_max = new_limit
+                self.plot_graph.setYRange(-1, self.current_y_max, padding=0)
+        # ------------------------------
+
         if len(self.data_y) > 1:
             try:
                 curr_max = max(self.data_y)
@@ -433,12 +440,13 @@ class RBT_GUI(QMainWindow):
         self.test_finished()
 
     def save_data(self, full_log):
+        # 1. SAVE CSV
         date_str = datetime.now().strftime("%Y%m%d")
         model = self.in_model.text().strip() or "Unknown"
         plate = self.in_plate.text().strip() or "NoPlate"
         folder_name = f"{date_str}_{model}_{plate}".replace(" ", "_")
         
-        base_path = os.path.join(os.path.expanduser("~"), "Desktop", "Measurements", folder_name)
+        base_path = os.path.join(self.measurements_root, folder_name)
         csv_path = os.path.join(base_path, "csv")
         png_path = os.path.join(base_path, "png")
         
@@ -472,15 +480,24 @@ class RBT_GUI(QMainWindow):
         except Exception as e:
             print(f"CSV Save failed: {e}")
 
+        # 2. GENERATE REPORT PNG
+        print("Starting Report Generation...")
         png_file = os.path.join(png_path, f"{file_base}.png")
+        
+        rpm_txt = self.spin_rpm.value()
+        rev_txt = self.spin_revs.value()
+        title_text = f"Residual Brake Torque Analysis - {wheel_short} - {rev_txt}REV_{rpm_txt}RPM"
+
         try:
-            exporter = ImageExporter(self.plot_graph.plotItem)
-            exporter.parameters()['width'] = 1200
-            exporter.export(png_file)
-        except Exception as e:
-            print(f"PNG Save failed: {e}")
+            self.plotter.generate_plot(csv_file, png_file, title_text)
+            print(f"Report saved to: {png_file}")
+            QMessageBox.information(self, "Saved", f"Test data and Report saved to:\n{base_path}")
             
-        QMessageBox.information(self, "Saved", f"Test data saved to:\n{base_path}")
+        except Exception as e:
+            print(f"Report Generation Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Warning", f"CSV saved, but Report Plot failed.\n{e}")
 
     def closeEvent(self, event):
         if self.pi.connected:

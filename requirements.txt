@@ -4,3 +4,6 @@ adafruit-blinka
 adafruit-circuitpython-ads1x15
 RPi.GPIO
 pigpio
+pandas
+numpy
+matlplotlib
